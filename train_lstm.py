@@ -1,12 +1,12 @@
 from torch.utils.data import DataLoader
-from transformers import BertTokenizer,BertTokenizerFast, BertForTokenClassification
+from model.LSTM import SentenceVectorizer,LSTMTagger
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 import torch.nn as nn
 import torch
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from dataset.code.NERDataset import NERDataset
+from dataset.code.NERDatase_LSTM import NERDataset
 import torch.nn.functional as F
 import ast
 if torch.backends.mps.is_available():
@@ -16,13 +16,24 @@ elif torch.cuda.is_available():
 else:
     device = torch.device("cpu")
 # 예시용: Token / Word label 개수
+# https://www.kaggle.com/code/mostafaessam33/named-entity-recognition-ner-lstm-96
 
+from torch.nn.utils.rnn import pad_sequence
 
+def label_vectorizer(labels, tags):
+    label_ids = []
+    for l in labels:
+        tag_ids = [tags.index(tag) for tag in l]
+        label_ids.append(torch.tensor(tag_ids, dtype=torch.long))
+    
+    # pad_sequence는 default가 batch_first=False라서 batch_first=True로 설정
+    padded_labels = pad_sequence(label_ids, batch_first=True, padding_value=-100)
+    return padded_labels
 
 df = pd.read_csv('./dataset/file/ner.csv', encoding='ISO-8859-1')
 
 sentences = df['Sentence'].to_numpy()
-tags = df['Tag'].apply(lambda x: ast.literal_eval(x[1:-1])).to_numpy()
+tags = df['Tag'].apply(lambda x: ast.literal_eval(x)).to_numpy()
 
 X_train, X_tmp, y_train, y_tmp = train_test_split(
     sentences, tags, test_size=1000, random_state=101)
@@ -44,16 +55,35 @@ id2tag={i:t for i,t in enumerate(tags)}
 
 print(tags)
 
-tokenizer = BertTokenizerFast.from_pretrained("./model/bert-large-multilingual-cased")
-model = BertForTokenClassification.from_pretrained("./model/bert-large-multilingual-cased", num_labels=len(tag2id))
-model.classifier = nn.Linear(model.config.hidden_size, len(tag2id))
+tokenizer = SentenceVectorizer(lowercase=False)
+tokenizer.adapt(sentences)
+
+# vocab 가져오기
+vocab = tokenizer.get_vocabulary()
+# print("Vocabulary:", vocab)
+# # 문장을 숫자 인덱스로 변환
+# encoded = tokenizer.encode(sentences)
+# print("Encoded Sentences:", encoded)
+
+# # 인덱스를 다시 문장으로 복원
+# decoded = tokenizer.decode(encoded)
+# print("Decoded Sentences:", decoded)
+
+model = LSTMTagger(vocab_size=len(vocab),
+    tagset_size=len(tag2id),
+    embedding_dim=100,
+    hidden_dim=128,
+    pad_idx=-100)
+
+
 model=model.to(device)
 batch_size=16
-train_dataset = NERDataset(X_train, y_train, tokenizer, tag2id,512)
+train_dataset = NERDataset(X_train, y_train, tokenizer, label_vectorizer, tags,128)
+val_dataset = NERDataset(X_val, y_val, tokenizer, label_vectorizer, tags,128)
+test_dataset = NERDataset(X_test, y_test, tokenizer, label_vectorizer, tags,128)
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-val_dataset = NERDataset(X_val, y_val, tokenizer, tag2id,512)
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
-
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
 from datetime import datetime
@@ -68,10 +98,9 @@ for epoch in range(100):
 
     for batch in train_loader:
         input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
         labels = batch['labels'].to(device)
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        loss = outputs.loss
+        outputs = model(input_ids=input_ids,  labels=labels)
+        loss = outputs['loss']
 
         loss.backward()
         optimizer.step()
@@ -89,23 +118,21 @@ for epoch in range(100):
             with torch.no_grad():
                 for val_batch in val_loader:
                     val_input_ids = val_batch['input_ids'].to(device)
-                    val_attention_mask = val_batch['attention_mask'].to(device)
                     val_labels = val_batch['labels'].to(device)
 
                     val_outputs = model(
                         input_ids=val_input_ids,
-                        attention_mask=val_attention_mask,
                         labels=val_labels
                     )
                     size = val_outputs['logits'].cpu().detach().shape[0] if  F.softmax(val_outputs['logits'], dim=-1).cpu().detach().shape[0]<=batch_size else batch_size
                     prob=F.softmax(val_outputs['logits'].cpu().detach(), dim=-1)
                     original_string = [[id2tag[int(torch.argmax(l,axis=-1).numpy())] for l in prob[b]] for b in range(size)]
                     labletab=[[id2tag[int(l.cpu().detach().numpy())]   for l in val_labels[b] ] for b in range(size) ]
-                    token=[tokenizer.decode(val_input_ids[b]) for b in range(size)]
+                    token=[tokenizer.decode(val_input_ids)]
                     print('token : ',token)
                     print('pred : ',original_string)
                     print('ans : ',labletab)
-                    val_loss += val_outputs.loss.item()
+                    val_loss += val_outputs['loss'].item()
 
             avg_val_loss = val_loss / len(val_loader)
             print(f"[Step {global_step}] Train Loss: {avg_val_loss:.4f}")

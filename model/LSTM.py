@@ -1,39 +1,62 @@
-class SimpleTokenizer:
-    def __init__(self, sentences, pad_token="<PAD>", unk_token="<UNK>"):
-        self.pad_token = pad_token
-        self.unk_token = unk_token
+import re
+from collections import Counter
 
-        # 단어 집합 만들기
-        all_tokens = []
-        for sentence in sentences:
-            all_tokens.extend(sentence.strip().split())
+class SentenceVectorizer:
+    def __init__(self, vocab_size=None, lowercase=False):
+        self.vocab_size = vocab_size
+        self.lowercase = lowercase
+        self.token2idx = {}
+        self.idx2token = {}
+        self.is_fitted = False
 
-        vocab = sorted(set(all_tokens))
-        self.word2idx = {word: idx + 2 for idx, word in enumerate(vocab)}
-        self.word2idx[pad_token] = 0
-        self.word2idx[unk_token] = 1
-        self.idx2word = {idx: word for word, idx in self.word2idx.items()}
+    def tokenize(self, sentence):
+        if self.lowercase:
+            sentence = sentence.lower()
+        # 단순히 공백 기준 분리 (필요하면 더 정교한 tokenizer로 교체 가능)
+        return re.findall(r'\w+|\S', sentence)
 
-    def encode(self, sentence):
-        return [
-            self.word2idx.get(token, self.word2idx[self.unk_token])
-            for token in sentence.strip().split()
-        ]
+    def adapt(self, sentences):
+        # 모든 문장을 토큰화
+        token_list = []
+        for sent in sentences:
+            tokens = self.tokenize(sent)
+            token_list.extend(tokens)
 
-    def decode(self, indices):
-        return [self.idx2word.get(idx, self.unk_token) for idx in indices]
+        # 토큰 빈도수 계산
+        counter = Counter(token_list)
+        most_common = counter.most_common(self.vocab_size)
 
-    def vocab_size(self):
-        return len(self.word2idx)
+        # vocab 만들기
+        self.token2idx = {token: idx + 2 for idx, (token, _) in enumerate(most_common)}
+        self.token2idx['[PAD]'] = 0
+        self.token2idx['[UNK]'] = 1
+        self.idx2token = {idx: token for token, idx in self.token2idx.items()}
 
-    def pad_sequence(self, sequences, max_len=None):
-        if max_len is None:
-            max_len = max(len(seq) for seq in sequences)
-        padded = []
-        for seq in sequences:
-            seq = seq[:max_len]
-            padded.append(seq + [self.word2idx[self.pad_token]] * (max_len - len(seq)))
-        return padded
+        self.is_fitted = True
+
+    def get_vocabulary(self):
+        if not self.is_fitted:
+            raise ValueError("You must call adapt() first!")
+        # vocab을 idx 기준으로 정렬해서 리턴
+        return [self.idx2token[i] for i in range(len(self.idx2token))]
+
+    def encode(self, sentences):
+        if isinstance(sentences, str):
+            sentences = [sentences]
+
+        encoded = []
+        for sent in sentences:
+            tokens = self.tokenize(sent)
+            ids = [self.token2idx.get(token, self.token2idx['[UNK]']) for token in tokens]
+            encoded.append(ids)
+        return encoded
+
+    def decode(self, ids):
+        sentences = []
+        for sent_ids in ids:
+            tokens = [self.idx2token.get(idx, '[UNK]') for idx in sent_ids]
+            sentences.append(' '.join(tokens))
+        return sentences
     
 import torch
 import torch.nn as nn
